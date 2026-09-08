@@ -31,7 +31,7 @@ the same live source release run and first attempt as `distribution-release`.
 The source's `container_build` and `seal_containers` jobs must have succeeded.
 Its input lock is fetched from the authenticated source commit; the receiver
 uses its own OCI verifier and verifies the source's Sigstore signature before
-exposing the Docker Hub token on a fresh GitHub-hosted runner. It never executes
+exposing the Docker Hub token on a distribution runner. It never executes
 transferred code or images. Skopeo copies the complete OCI graphs while
 preserving digests, and the receiver reads back every index and platform
 manifest to compare exact bytes.
@@ -56,6 +56,12 @@ username variable, password login, or alternate registry destination, and the
 source repository never receives the registry token.
 
 ## Validation
+
+CI and publication use the `self-hosted, wagie-distribution` runner pool. Each
+NUC runs a separate Compose service with its own container workspace and no
+shared build caches or host Docker socket. Compose restarts the container after
+each ephemeral runner registration completes; the container filesystem is
+reused between jobs.
 
 Run `make test` with Python 3.12+, Bash 5.2+ and ShellCheck 0.9.0. The validation
 script downloads and verifies actionlint 1.7.12 when it is not already installed.

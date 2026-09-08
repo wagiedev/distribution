@@ -96,7 +96,10 @@ def main():
     require("branches: [master]" in ci, "CI must cover the default branch")
     for document in (workflow, ci):
         runners = re.findall(r"^    runs-on: (.+)$", document, re.MULTILINE)
-        require(runners and all(runner == "ubuntu-24.04" for runner in runners), "authority and validation jobs require fresh hosted runners")
+        require(
+            runners and all(runner == "[self-hosted, wagie-distribution]" for runner in runners),
+            "authority and validation jobs require the distribution runner pool",
+        )
     require("refs/heads/main" not in workflow and "commits/main" not in workflow + publisher, "receiver retains an obsolete branch")
     require("done < <(python3" not in workflow, "verification must check manifest enumeration before entering its loop")
 
