@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+STATE = Path(os.environ["FAKE_GH_STATE"])
+LOG = STATE / "calls.log"
+TRANSFER = Path(os.environ["FAKE_TRANSFER_ROOT"])
+RECEIVER_SHA = os.environ["GITHUB_SHA"]
+TAG = os.environ["TAG"]
+SCENARIO = os.environ.get("FAKE_GH_SCENARIO", "success")
+
+
+def append(line):
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def argument(name):
+    try:
+        return sys.argv[sys.argv.index(name) + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def endpoint():
+    for value in sys.argv[1:]:
+        if value.startswith("repos/"):
+            return value
+    raise SystemExit("fake gh received no repository endpoint")
+
+
+def output(value):
+    if isinstance(value, str):
+        print(value)
+    else:
+        print(json.dumps(value, separators=(",", ":")))
+
+
+def asset_records():
+    uploads_path = STATE / "uploads.log"
+    uploads = uploads_path.read_text(encoding="utf-8").splitlines() if uploads_path.exists() else []
+    names = sorted(path.name for path in (TRANSFER / "assets").iterdir())
+    evidence = Path(os.environ["FAKE_CONTAINER_EVIDENCE"])
+    names.append(evidence.name)
+    if uploads != [f"77\t{name}" for name in names]:
+        raise SystemExit("publisher did not upload the exact sorted closure to release 77")
+    result = []
+    for index, name in enumerate(names):
+        raw = (evidence if name == evidence.name else TRANSFER / "assets" / name).read_bytes()
+        result.append(
+            {
+                "id": index + 1,
+                "name": name,
+                "state": "uploaded",
+                "size": len(raw),
+                "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    return result
+
+
+def release_response(published):
+    return {
+        "id": 77,
+        "tag_name": TAG,
+        "target_commitish": RECEIVER_SHA,
+        "name": TAG,
+        "draft": not published,
+        "prerelease": False,
+        "immutable": published,
+        "published_at": "2026-09-01T00:00:00Z" if published else None,
+        "assets": asset_records(),
+    }
+
+
+def read_input():
+    path = argument("--input")
+    if path is None:
+        raise SystemExit("mutating fake gh call has no input")
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] != "api":
+        raise SystemExit("fake gh only accepts api calls")
+    target = endpoint()
+    method = argument("--method") or "GET"
+    append(f"{method}\t{target}")
+
+    if target.endswith("/commits/master"):
+        output(RECEIVER_SHA)
+        return
+    if target.endswith("/immutable-releases"):
+        output({"enabled": True})
+        return
+    if target.endswith("/releases?per_page=100"):
+        if SCENARIO == "absence-error":
+            print("HTTP/2.0 500 Internal Server Error", file=sys.stderr)
+            raise SystemExit(1)
+        if SCENARIO == "malformed-list":
+            output({"id": 5, "tag_name": False})
+            return
+        if SCENARIO == "preexisting":
+            output({"id": 5, "tag_name": TAG, "draft": True})
+        return
+    if "/git/ref/tags/" in target and (STATE / "tag-created").exists():
+        output(RECEIVER_SHA)
+        return
+    if "/git/ref/tags/" in target:
+        print("HTTP/2.0 404 Not Found", file=sys.stderr)
+        raise SystemExit(1)
+    if target.endswith("/git/refs") and method == "POST":
+        request = read_input()
+        if request != {"ref": f"refs/tags/{TAG}", "sha": RECEIVER_SHA}:
+            raise SystemExit("fresh tag request is not exact")
+        (STATE / "tag-created").touch()
+        output({"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": RECEIVER_SHA}})
+        return
+    if target.endswith("/releases") and method == "POST":
+        if not (STATE / "tag-created").exists():
+            raise SystemExit("draft was created before the atomic tag")
+        request = read_input()
+        fixed = {
+            "tag_name": TAG,
+            "target_commitish": RECEIVER_SHA,
+            "name": TAG,
+            "draft": True,
+            "prerelease": False,
+            "generate_release_notes": False,
+            "make_latest": "false",
+        }
+        if any(request.get(key) != value for key, value in fixed.items()):
+            raise SystemExit("fresh draft request is not exact")
+        (STATE / "release-created").touch()
+        output({"id": 77})
+        return
+    if target.endswith("/releases/77") and method == "GET":
+        if not (STATE / "release-created").exists():
+            raise SystemExit("release readback preceded creation")
+        output(release_response((STATE / "published").exists()))
+        return
+    if target.endswith("/releases/77") and method == "PATCH":
+        if read_input() != {"draft": False, "make_latest": "false"}:
+            raise SystemExit("promotion request is not exact")
+        asset_records()
+        (STATE / "published").touch()
+        output(release_response(True))
+        return
+    raise SystemExit(f"unexpected fake gh call: {method} {target}")
+
+
+if __name__ == "__main__":
+    main()

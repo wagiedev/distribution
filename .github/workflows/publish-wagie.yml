@@ -1,0 +1,530 @@
+name: Publish Wagie
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        required: true
+        type: string
+      source_run_id:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      source_artifact_id:
+        required: true
+        type: string
+      source_artifact_digest:
+        required: true
+        type: string
+      container_artifact_id:
+        required: true
+        type: string
+      container_artifact_digest:
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-wagie-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  authenticate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      transfer_artifact_id: ${{ steps.transfer.outputs.artifact-id }}
+      transfer_artifact_digest: ${{ steps.transfer.outputs.artifact-digest }}
+      container_transfer_id: ${{ steps.containers.outputs.artifact-id }}
+      container_transfer_digest: ${{ steps.containers.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Authenticate the handoff actor
+        env:
+          EXPECTED_HANDOFF_ACTOR: ${{ vars.WAGIE_HANDOFF_APP_ACTOR }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_HANDOFF_ACTOR" =~ ^[A-Za-z0-9-]+\[bot\]$ ]]
+          test "$GITHUB_ACTOR" = "$EXPECTED_HANDOFF_ACTOR"
+          test "$GITHUB_TRIGGERING_ACTOR" = "$EXPECTED_HANDOFF_ACTOR"
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REPOSITORY" = wagiedev/distribution
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/master
+
+      - name: Validate dispatch coordinates
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          CONTAINER_ARTIFACT_ID: ${{ inputs.container_artifact_id }}
+          CONTAINER_ARTIFACT_DIGEST: ${{ inputs.container_artifact_digest }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_policy.py validate-inputs \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$TAG" \
+            --source-artifact-id "$SOURCE_ARTIFACT_ID" \
+            --source-artifact-digest "$SOURCE_ARTIFACT_DIGEST" \
+            --container-artifact-id "$CONTAINER_ARTIFACT_ID" \
+            --container-artifact-digest "$CONTAINER_ARTIFACT_DIGEST"
+
+      - name: Mint source-only read authority
+        id: source_reader
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WAGIE_SOURCE_READER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WAGIE_SOURCE_READER_APP_PRIVATE_KEY }}
+          owner: Savid
+          repositories: wagie
+          permission-actions: read
+          permission-contents: read
+
+      - name: Authenticate the live source run and artifact
+        env:
+          GH_TOKEN: ${{ steps.source_reader.outputs.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          CONTAINER_ARTIFACT_ID: ${{ inputs.container_artifact_id }}
+          CONTAINER_ARTIFACT_DIGEST: ${{ inputs.container_artifact_digest }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          api_version=2026-03-10
+          mkdir -p "$RUNNER_TEMP/source"
+          gh api -H "X-GitHub-Api-Version: $api_version" \
+            "repos/Savid/wagie/actions/runs/$SOURCE_RUN_ID/attempts/1" \
+            > "$RUNNER_TEMP/source/run.json"
+          gh api --paginate -H "X-GitHub-Api-Version: $api_version" \
+            "repos/Savid/wagie/actions/runs/$SOURCE_RUN_ID/attempts/1/jobs?per_page=100" \
+            --jq '.jobs[]' | jq -s '{total_count:length,jobs:.}' \
+            > "$RUNNER_TEMP/source/jobs.json"
+          gh api -H "X-GitHub-Api-Version: $api_version" \
+            "repos/Savid/wagie/actions/artifacts/$SOURCE_ARTIFACT_ID" \
+            > "$RUNNER_TEMP/source/artifact.json"
+          gh api -H "X-GitHub-Api-Version: $api_version" \
+            "repos/Savid/wagie/actions/artifacts/$CONTAINER_ARTIFACT_ID" \
+            > "$RUNNER_TEMP/source/container-artifact.json"
+          mkdir -p container-transfer
+          gh api -H "X-GitHub-Api-Version: $api_version" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/Savid/wagie/contents/distribution/image-inputs.env?ref=$SOURCE_SHA" \
+            > container-transfer/image-inputs.env
+          gh api -H "X-GitHub-Api-Version: $api_version" \
+            "repos/Savid/wagie/commits/$TAG" \
+            > "$RUNNER_TEMP/source/tag-commit.json"
+          python3 scripts/release_policy.py validate-source \
+            --run "$RUNNER_TEMP/source/run.json" \
+            --jobs "$RUNNER_TEMP/source/jobs.json" \
+            --artifact "$RUNNER_TEMP/source/artifact.json" \
+            --container-artifact "$RUNNER_TEMP/source/container-artifact.json" \
+            --tag-commit "$RUNNER_TEMP/source/tag-commit.json" \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$TAG" \
+            --source-artifact-id "$SOURCE_ARTIFACT_ID" \
+            --source-artifact-digest "$SOURCE_ARTIFACT_DIGEST" \
+            --container-artifact-id "$CONTAINER_ARTIFACT_ID" \
+            --container-artifact-digest "$CONTAINER_ARTIFACT_DIGEST"
+
+      - name: Download the exact source artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ inputs.source_artifact_id }}
+          path: source-transfer
+          github-token: ${{ steps.source_reader.outputs.token }}
+          repository: Savid/wagie
+          run-id: ${{ inputs.source_run_id }}
+          digest-mismatch: error
+
+      - name: Download the exact source container artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ inputs.container_artifact_id }}
+          path: container-transfer/containers
+          github-token: ${{ steps.source_reader.outputs.token }}
+          repository: Savid/wagie
+          run-id: ${{ inputs.source_run_id }}
+          digest-mismatch: error
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Verify the closed source bundle and signed provenance
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_policy.py verify-transfer \
+            --root source-transfer \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$TAG"
+          identity="https://github.com/Savid/wagie/.github/workflows/release.yml@refs/tags/$TAG"
+          python3 scripts/release_policy.py signature-pairs --tag "$TAG" > "$RUNNER_TEMP/signature-pairs.txt"
+          test -s "$RUNNER_TEMP/signature-pairs.txt"
+          while IFS=$'\t' read -r blob bundle; do
+            cosign verify-blob --offline --bundle "source-transfer/assets/$bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "source-transfer/assets/$blob"
+          done < "$RUNNER_TEMP/signature-pairs.txt"
+          cosign verify-blob --offline \
+            --bundle container-transfer/containers/images.json.sigstore.json \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            container-transfer/containers/images.json
+          cp source-transfer/assets/release.json container-transfer/release.json
+          source_epoch=$(jq -er .sourceEpoch container-transfer/release.json)
+          python3 scripts/oci_policy.py verify \
+            --root container-transfer/containers --version "${TAG#v}" \
+            --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
+            --inputs container-transfer/image-inputs.env --require-signature
+
+      - name: Preserve only independently verified transfer bytes
+        id: transfer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-wagie-release
+          path: |
+            source-transfer/assets
+            source-transfer/evidence
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+
+      - name: Preserve verified container bytes and the authenticated input lock
+        id: containers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-wagie-containers
+          path: container-transfer
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish_images:
+    needs: authenticate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: docker-release
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      evidence_artifact_id: ${{ steps.evidence.outputs.artifact-id }}
+      evidence_artifact_digest: ${{ steps.evidence.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Recover exact verified container bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.authenticate.outputs.container_transfer_id }}
+          path: verified-containers
+          digest-mismatch: error
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Install distribution-packaged registry copier
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+
+      - name: Authenticate and reverify OCI bytes before Docker Hub authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSFER_ARTIFACT_ID: ${{ needs.authenticate.outputs.container_transfer_id }}
+          TRANSFER_ARTIFACT_DIGEST: ${{ needs.authenticate.outputs.container_transfer_digest }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TRANSFER_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TRANSFER_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$TRANSFER_ARTIFACT_ID" | jq -e \
+            --argjson id "$TRANSFER_ARTIFACT_ID" \
+            --arg digest "sha256:$TRANSFER_ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" '
+              .id == $id and .name == "verified-wagie-containers" and
+              .expired == false and .digest == $digest and
+              .workflow_run.id == $run and .workflow_run.head_sha == $sha
+            ' >/dev/null
+          destination_tip=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            repos/wagiedev/distribution/commits/master --jq .sha)
+          test "$destination_tip" = "$GITHUB_SHA"
+          identity="https://github.com/Savid/wagie/.github/workflows/release.yml@refs/tags/$TAG"
+          cosign verify-blob --offline \
+            --bundle verified-containers/containers/images.json.sigstore.json \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            verified-containers/containers/images.json
+          source_epoch=$(jq -er .sourceEpoch verified-containers/release.json)
+          python3 scripts/oci_policy.py verify \
+            --root verified-containers/containers --version "${TAG#v}" \
+            --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
+            --inputs verified-containers/image-inputs.env --require-signature
+
+      - name: Publish all immutable versions and verify registry bytes
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          source_epoch=$(jq -er .sourceEpoch verified-containers/release.json)
+          python3 scripts/publish_images.py publish \
+            --root verified-containers/containers --version "${TAG#v}" \
+            --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
+            --inputs verified-containers/image-inputs.env
+
+      - name: Prepare public signed evidence after all images pass readback
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          source_epoch=$(jq -er .sourceEpoch verified-containers/release.json)
+          python3 scripts/oci_policy.py export-evidence \
+            --root verified-containers/containers --output "$RUNNER_TEMP/container-evidence" \
+            --version "${TAG#v}" --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
+            --inputs verified-containers/image-inputs.env
+          mkdir -p public-container-evidence
+          python3 scripts/publish_images.py archive-evidence \
+            --root "$RUNNER_TEMP/container-evidence" \
+            --output "public-container-evidence/containers_${TAG#v}.tar.gz"
+
+      - name: Preserve exact public container evidence
+        id: evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: published-container-evidence
+          path: public-container-evidence
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: [authenticate, publish_images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Recover exact verified bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.authenticate.outputs.transfer_artifact_id }}
+          path: verified-transfer
+          digest-mismatch: error
+
+      - name: Recover container evidence only after image publication succeeds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.publish_images.outputs.evidence_artifact_id }}
+          path: public-container-evidence
+          digest-mismatch: error
+
+      - name: Authenticate image publication evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_ARTIFACT_ID: ${{ needs.publish_images.outputs.evidence_artifact_id }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ needs.publish_images.outputs.evidence_artifact_digest }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$EVIDENCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EVIDENCE_ARTIFACT_ID" | jq -e \
+            --argjson id "$EVIDENCE_ARTIFACT_ID" \
+            --arg digest "sha256:$EVIDENCE_ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" '
+              .id == $id and .name == "published-container-evidence" and
+              .expired == false and .digest == $digest and
+              .workflow_run.id == $run and .workflow_run.head_sha == $sha
+            ' >/dev/null
+          python3 scripts/publish_images.py unpack-evidence \
+            --archive "public-container-evidence/containers_${TAG#v}.tar.gz" \
+            --output "$RUNNER_TEMP/container-evidence"
+          source_epoch=$(jq -er .sourceEpoch verified-transfer/assets/release.json)
+          python3 scripts/oci_policy.py verify-evidence \
+            --root "$RUNNER_TEMP/container-evidence" --version "${TAG#v}" \
+            --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
+            --inputs "$RUNNER_TEMP/container-evidence/image-inputs.env"
+
+      - name: Reverify publication input without source credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSFER_ARTIFACT_ID: ${{ needs.authenticate.outputs.transfer_artifact_id }}
+          TRANSFER_ARTIFACT_DIGEST: ${{ needs.authenticate.outputs.transfer_artifact_digest }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TRANSFER_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TRANSFER_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$TRANSFER_ARTIFACT_ID" | jq -e \
+            --argjson id "$TRANSFER_ARTIFACT_ID" \
+            --arg digest "sha256:$TRANSFER_ARTIFACT_DIGEST" \
+            --argjson run "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" '
+              .id == $id and .name == "verified-wagie-release" and
+              .expired == false and .digest == $digest and
+              .workflow_run.id == $run and .workflow_run.head_sha == $sha
+            ' >/dev/null
+          python3 scripts/release_policy.py verify-transfer \
+            --root verified-transfer \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$TAG"
+
+      - name: Write exact asset checksums for attestation
+        env:
+          TAG: ${{ inputs.tag }}
+        run: >-
+          python3 scripts/release_policy.py write-checksums
+          --root verified-transfer
+          --container-evidence "public-container-evidence/containers_${TAG#v}.tar.gz"
+          --output "$RUNNER_TEMP/publication-assets.sha256"
+
+      - name: Attest every exact release asset
+        id: attest_assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/publication-assets.sha256
+
+      - name: Verify asset attestations before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest_assets.outputs.bundle-path }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_policy.py list-assets --tag "$TAG" > "$RUNNER_TEMP/release-assets.txt"
+          test -s "$RUNNER_TEMP/release-assets.txt"
+          while IFS= read -r asset; do
+            gh attestation verify "verified-transfer/assets/$asset" \
+              --repo wagiedev/distribution \
+              --bundle "$BUNDLE" \
+              --signer-workflow wagiedev/distribution/.github/workflows/publish-wagie.yml \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref refs/heads/master
+          done < "$RUNNER_TEMP/release-assets.txt"
+          gh attestation verify "public-container-evidence/containers_${TAG#v}.tar.gz" \
+            --repo wagiedev/distribution --bundle "$BUNDLE" \
+            --signer-workflow wagiedev/distribution/.github/workflows/publish-wagie.yml \
+            --source-digest "$GITHUB_SHA" --source-ref refs/heads/master
+
+      - name: Mint destination policy read authority
+        id: destination_policy
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WAGIE_RELEASE_WRITER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WAGIE_RELEASE_WRITER_APP_PRIVATE_KEY }}
+          owner: wagiedev
+          repositories: distribution
+          permission-administration: read
+
+      - name: Authenticate destination tip and immutable policy before write authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESTINATION_POLICY_TOKEN: ${{ steps.destination_policy.outputs.token }}
+        run: |
+          set -euo pipefail
+          destination_tip=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            repos/wagiedev/distribution/commits/master --jq .sha)
+          test "$destination_tip" = "$GITHUB_SHA"
+          immutable=$(GH_TOKEN="$DESTINATION_POLICY_TOKEN" gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            repos/wagiedev/distribution/immutable-releases)
+          jq -e '.enabled == true' <<<"$immutable" >/dev/null
+
+      - name: Mint destination-only release authority
+        id: release_writer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.WAGIE_RELEASE_WRITER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WAGIE_RELEASE_WRITER_APP_PRIVATE_KEY }}
+          owner: wagiedev
+          repositories: distribution
+          permission-contents: write
+
+      - name: Create, upload, and immutably publish once
+        env:
+          GH_TOKEN: ${{ steps.release_writer.outputs.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          CONTAINER_ARTIFACT_ID: ${{ inputs.container_artifact_id }}
+          CONTAINER_ARTIFACT_DIGEST: ${{ inputs.container_artifact_digest }}
+        run: scripts/publish.sh verified-transfer "public-container-evidence/containers_${TAG#v}.tar.gz"
+
+      - name: Verify immutable release and every asset by GitHub readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          verified=false
+          for _ in {1..12}; do
+            if gh release verify "$TAG" -R wagiedev/distribution; then
+              verified=true
+              break
+            fi
+            sleep 5
+          done
+          test "$verified" = true
+          python3 scripts/release_policy.py list-assets --tag "$TAG" > "$RUNNER_TEMP/release-assets.txt"
+          test -s "$RUNNER_TEMP/release-assets.txt"
+          while IFS= read -r asset; do
+            gh release verify-asset "$TAG" "verified-transfer/assets/$asset" \
+              -R wagiedev/distribution
+          done < "$RUNNER_TEMP/release-assets.txt"
+          gh release verify-asset "$TAG" "public-container-evidence/containers_${TAG#v}.tar.gz" \
+            -R wagiedev/distribution
