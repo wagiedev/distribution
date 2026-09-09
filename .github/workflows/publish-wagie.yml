@@ -37,7 +37,8 @@ concurrency:
 jobs:
   authenticate:
     runs-on: [self-hosted, wagie-distribution]
-    timeout-minutes: 25
+    # Restore, authenticate, and round-trip both the binary and OCI handoffs.
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:

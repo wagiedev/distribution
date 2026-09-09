@@ -116,7 +116,7 @@ def main():
     require("done < <(python3" not in workflow, "verification must check manifest enumeration before entering its loop")
 
     timeouts = [int(value) for value in re.findall(r"^    timeout-minutes: ([0-9]+)$", workflow, re.MULTILINE)]
-    require(timeouts == [25, 60, 25], "receiver timeout budgets must cover authentication, image promotion and downloads")
+    require(timeouts == [60, 60, 25], "receiver timeout budgets must cover authentication, image promotion and downloads")
 
     image_job = section(workflow, "  publish_images:\n", "  publish:\n")
     native_job = section(workflow, "  publish:\n")
