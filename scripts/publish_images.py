@@ -28,6 +28,7 @@ ACCEPT = ", ".join(("application/vnd.oci.image.index.v1+json",
                     "application/vnd.oci.image.manifest.v1+json"))
 MAX_RESPONSE = 8 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 19
 
 
 def decode_json(raw):
@@ -199,6 +200,7 @@ def skopeo_publisher(pat, directory):
 
 def archive_evidence(root, output):
     root, output = Path(root), Path(output)
+    members = 0
     with output.open("xb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
@@ -206,7 +208,10 @@ def archive_evidence(root, output):
                     mode = path.lstat().st_mode
                     if stat.S_ISDIR(mode):
                         continue
-                    require_regular(path, MAX_ARCHIVE)
+                    members += 1
+                    if members > MAX_ARCHIVE_MEMBERS:
+                        fail("container evidence archive has too many members")
+                    require_regular(path, oci_policy.MAX_EVIDENCE)
                     info = tarfile.TarInfo(path.relative_to(root).as_posix())
                     info.size = path.stat().st_size
                     info.mode = 0o644
@@ -220,19 +225,19 @@ def unpack_evidence(archive_path, output):
     require_regular(Path(archive_path), MAX_ARCHIVE)
     output = Path(output)
     output.mkdir(mode=0o700)
-    names, total = set(), 0
+    names = set()
     with tarfile.open(archive_path, mode="r:gz") as archive:
         for member in archive:
             name = member.name
             path = PurePosixPath(name)
             if (not member.isfile() or member.mode != 0o644 or path.is_absolute()
                     or ".." in path.parts or str(path) != name or name in names
-                    or len(names) >= 19 or member.size <= 0):
+                    or len(names) >= MAX_ARCHIVE_MEMBERS
+                    or not 0 < member.size <= oci_policy.MAX_EVIDENCE):
                 fail("unsafe or non-exact container evidence archive member")
             names.add(name)
-            total += member.size
-            if total > MAX_ARCHIVE:
-                fail("container evidence archive exceeds policy")
+            # Bound expanded bytes by the finite file count and per-file OCI
+            # evidence limit; MAX_ARCHIVE applies to the compressed archive.
             target = output.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.extractfile(member) as source, target.open("xb") as destination:

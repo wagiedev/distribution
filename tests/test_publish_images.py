@@ -201,6 +201,45 @@ class PublicationTests(unittest.TestCase):
                 with self.assertRaises(PolicyError):
                     publisher.unpack_evidence(path, root / "output")
 
+    def test_evidence_archive_roundtrips_combined_files_above_compressed_limit(self):
+        # The compressed archive and each individual SBOM fit, but their combined
+        # expanded bytes exceed the compressed limit (as in the v0.0.33 release).
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(publisher, "MAX_ARCHIVE", 1024), \
+                mock.patch.object(oci_policy, "MAX_EVIDENCE", 512):
+            root = Path(temporary)
+            public = root / "public"
+            public.mkdir()
+            expected = {f"sbom-{index}.json": bytes([65 + index]) * 400 for index in range(3)}
+            for name, raw in expected.items():
+                (public / name).write_bytes(raw)
+            archive = root / "containers.tar.gz"
+            publisher.archive_evidence(public, archive)
+            self.assertLess(archive.stat().st_size, 1024)
+            unpacked = root / "unpacked"
+            publisher.unpack_evidence(archive, unpacked)
+            self.assertEqual(expected, {path.name: path.read_bytes() for path in unpacked.iterdir()})
+
+    def test_evidence_archive_rejects_oversized_or_too_many_members_on_both_sides(self):
+        for label, sizes in (("oversized", [513]), ("too many", [1] * 20)):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary, \
+                    mock.patch.object(oci_policy, "MAX_EVIDENCE", 512):
+                root = Path(temporary)
+                public = root / "public"
+                public.mkdir()
+                archive = root / "untrusted.tar.gz"
+                with tarfile.open(archive, "w:gz") as tar:
+                    for index, size in enumerate(sizes):
+                        name, raw = f"member-{index}", b"x" * size
+                        (public / name).write_bytes(raw)
+                        member = tarfile.TarInfo(name)
+                        member.size, member.mode = size, 0o644
+                        tar.addfile(member, io.BytesIO(raw))
+                with self.assertRaises(PolicyError):
+                    publisher.archive_evidence(public, root / "produced.tar.gz")
+                with self.assertRaises(PolicyError):
+                    publisher.unpack_evidence(archive, root / "unpacked")
+
 
 @unittest.skipUnless(os.environ.get("WAGIE_TEST_REGISTRY") == "1", "run make test-registry for real Skopeo/registry coverage")
 class RegistryIntegrationTests(unittest.TestCase):
