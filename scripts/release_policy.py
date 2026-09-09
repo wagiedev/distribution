@@ -588,6 +588,9 @@ def validate_artifact_identity(artifact, artifact_id, artifact_digest, name, sea
     if any(artifact.get(key) != value for key, value in expected_artifact.items()):
         fail("source artifact identity is invalid")
     integer(artifact.get("id"), "source artifact ID")
+    size = artifact.get("size_in_bytes")
+    if type(size) is not int or not 0 < size <= 2 * 1024 * 1024:
+        fail("source artifact must be a bounded NUC transfer receipt")
     if type(artifact.get("expired")) is not bool:
         fail("source artifact expiration state is not a boolean")
     if not isinstance(artifact_run, dict):

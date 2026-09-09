@@ -86,6 +86,17 @@ jobs:
             --container-artifact-id "$CONTAINER_ARTIFACT_ID" \
             --container-artifact-digest "$CONTAINER_ARTIFACT_DIGEST"
 
+      - name: Require private NUC artifact transport before publication
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+        run: python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" probe
+
       - name: Mint source-only read authority
         id: source_reader
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -158,6 +169,22 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
           digest-mismatch: error
 
+      - name: Restore and verify NUC artifact bytes
+        shell: bash
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATH: source-transfer
+          ARTIFACT_SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          ARTIFACT_SOURCE_RUN: ${{ inputs.source_run_id }}
+          ARTIFACT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" restore --path "$ARTIFACT_PATH" \
+            --repository "$ARTIFACT_SOURCE_REPOSITORY" --run "$ARTIFACT_SOURCE_RUN" --attempt 1 --sha "$ARTIFACT_SOURCE_SHA"
+
       - name: Download the exact source container artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -167,6 +194,22 @@ jobs:
           repository: Savid/wagie
           run-id: ${{ inputs.source_run_id }}
           digest-mismatch: error
+
+      - name: Restore and verify NUC artifact bytes
+        shell: bash
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATH: container-transfer/containers
+          ARTIFACT_SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          ARTIFACT_SOURCE_RUN: ${{ inputs.source_run_id }}
+          ARTIFACT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" restore --path "$ARTIFACT_PATH" \
+            --repository "$ARTIFACT_SOURCE_REPOSITORY" --run "$ARTIFACT_SOURCE_RUN" --attempt 1 --sha "$ARTIFACT_SOURCE_SHA"
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
@@ -205,25 +248,62 @@ jobs:
             --source-sha "$SOURCE_SHA" --source-epoch "$source_epoch" \
             --inputs container-transfer/image-inputs.env --require-signature
 
-      - name: Preserve only independently verified transfer bytes
-        id: transfer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: verified-wagie-release
-          path: |
+      - name: Store verified-wagie-release bytes on the NUC
+        shell: bash
+        id: nuc_transfer
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATHS: |
             source-transfer/assets
             source-transfer/evidence
+          ARTIFACT_NAME: verified-wagie-release
+        run: |
+          set -euo pipefail
+          receipt=$(mktemp -d "$RUNNER_TEMP/nuc-artifact.XXXXXX")
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" publish \
+            --path "$ARTIFACT_PATHS" --name "$ARTIFACT_NAME" --output "$receipt" \
+            --if-no-files-found error
+          printf 'path=%s\n' "$receipt/nuc-artifact.json" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve only independently verified transfer bytes
+        id: transfer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-wagie-release
+          path: ${{ steps.nuc_transfer.outputs.path }}
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
 
+      - name: Store verified-wagie-containers bytes on the NUC
+        shell: bash
+        id: nuc_containers
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATHS: container-transfer
+          ARTIFACT_NAME: verified-wagie-containers
+        run: |
+          set -euo pipefail
+          receipt=$(mktemp -d "$RUNNER_TEMP/nuc-artifact.XXXXXX")
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" publish \
+            --path "$ARTIFACT_PATHS" --name "$ARTIFACT_NAME" --output "$receipt" \
+            --if-no-files-found error
+          printf 'path=%s\n' "$receipt/nuc-artifact.json" >> "$GITHUB_OUTPUT"
 
       - name: Preserve verified container bytes and the authenticated input lock
         id: containers
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: verified-wagie-containers
-          path: container-transfer
+          path: ${{ steps.nuc_containers.outputs.path }}
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -251,6 +331,18 @@ jobs:
           artifact-ids: ${{ needs.authenticate.outputs.container_transfer_id }}
           path: verified-containers
           digest-mismatch: error
+
+      - name: Restore and verify NUC artifact bytes
+        shell: bash
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATH: verified-containers
+        run: |
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" restore --path "$ARTIFACT_PATH"
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
@@ -326,12 +418,31 @@ jobs:
             --root "$RUNNER_TEMP/container-evidence" \
             --output "public-container-evidence/containers_${TAG#v}.tar.gz"
 
+      - name: Store published-container-evidence bytes on the NUC
+        shell: bash
+        id: nuc_evidence
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATHS: public-container-evidence
+          ARTIFACT_NAME: published-container-evidence
+        run: |
+          set -euo pipefail
+          receipt=$(mktemp -d "$RUNNER_TEMP/nuc-artifact.XXXXXX")
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" publish \
+            --path "$ARTIFACT_PATHS" --name "$ARTIFACT_NAME" --output "$receipt" \
+            --if-no-files-found error
+          printf 'path=%s\n' "$receipt/nuc-artifact.json" >> "$GITHUB_OUTPUT"
+
       - name: Preserve exact public container evidence
         id: evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: published-container-evidence
-          path: public-container-evidence
+          path: ${{ steps.nuc_evidence.outputs.path }}
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -358,12 +469,36 @@ jobs:
           path: verified-transfer
           digest-mismatch: error
 
+      - name: Restore and verify NUC artifact bytes
+        shell: bash
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATH: verified-transfer
+        run: |
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" restore --path "$ARTIFACT_PATH"
+
       - name: Recover container evidence only after image publication succeeds
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           artifact-ids: ${{ needs.publish_images.outputs.evidence_artifact_id }}
           path: public-container-evidence
           digest-mismatch: error
+
+      - name: Restore and verify NUC artifact bytes
+        shell: bash
+        env:
+          WAGIE_ARTIFACT_ENDPOINT: ${{ vars.WAGIE_ARTIFACT_ENDPOINT }}
+          WAGIE_ARTIFACT_CA_CERT: ${{ vars.WAGIE_ARTIFACT_CA_CERT }}
+          WAGIE_ARTIFACT_BUCKET: ${{ vars.WAGIE_ARTIFACT_BUCKET }}
+          WAGIE_ARTIFACT_ACCESS_KEY_ID: ${{ secrets.WAGIE_ARTIFACT_ACCESS_KEY_ID }}
+          WAGIE_ARTIFACT_SECRET_ACCESS_KEY: ${{ secrets.WAGIE_ARTIFACT_SECRET_ACCESS_KEY }}
+          ARTIFACT_PATH: public-container-evidence
+        run: |
+          python3 -I "$GITHUB_WORKSPACE/scripts/artifact-store.py" restore --path "$ARTIFACT_PATH"
 
       - name: Authenticate image publication evidence
         env:

@@ -49,6 +49,19 @@ investigation followed by a fresh version; retries do not adopt or overwrite
 existing artifacts. Environment approval delays count against the source's
 handoff deadline.
 
+GitHub Actions carries transfer receipts capped at 1 MiB, retained for one day.
+The binary, OCI and evidence files travel through the private NUC object store;
+the receiver checks their identity, SHA256, size and mode against the authenticated
+receipt before applying the existing release and signature policies. The store
+expires objects after one day and enforces a 128 GiB bucket quota.
+
+Configure `WAGIE_ARTIFACT_ENDPOINT`, `WAGIE_ARTIFACT_BUCKET` and
+`WAGIE_ARTIFACT_CA_CERT` as repository variables, plus
+`WAGIE_ARTIFACT_ACCESS_KEY_ID` and `WAGIE_ARTIFACT_SECRET_ACCESS_KEY` as secrets.
+The distribution key reads the source prefix and reads/writes its own prefix;
+it cannot write source objects or administer the store. The runners require the
+AWS CLI and a route to the HTTPS endpoint. A probe checks this before publication.
+
 No App used by this workflow has Workflows write, Administration write, or
 access to repository secrets; jobs request only the permissions needed for their
 step. The Docker Hub username is fixed in reviewed receiver code, so there is no

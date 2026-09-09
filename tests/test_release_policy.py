@@ -315,6 +315,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "artifact": {
                 "id": int(SOURCE_ARTIFACT_ID),
                 "name": "distribution-release",
+                "size_in_bytes": 4096,
                 "expired": False,
                 "digest": "sha256:" + SOURCE_DIGEST,
                 "workflow_run": {
@@ -363,6 +364,9 @@ class ReleasePolicyTests(unittest.TestCase):
             "wrong dispatch attempt": lambda v: v["jobs"]["jobs"][-1].update(run_attempt=2),
             "artifact digest": lambda v: v["artifact"].update(digest="sha256:" + "f" * 64),
             "artifact boolean ID": lambda v: v["artifact"].update(id=True),
+            "oversize source receipt": lambda v: v["artifact"].update(size_in_bytes=2 * 1024 * 1024 + 1),
+            "oversize container receipt": lambda v: v["container_artifact"].update(size_in_bytes=2 * 1024 * 1024 + 1),
+            "invalid receipt size": lambda v: v["artifact"].update(size_in_bytes=True),
             "artifact expired scalar": lambda v: v["artifact"].update(expired=0),
             "older attempt artifact": lambda v: v["artifact"].update(created_at="2026-08-31T23:59:00Z", updated_at="2026-08-31T23:59:30Z"),
             "artifact after seal": lambda v: v["artifact"].update(created_at="2026-09-01T00:11:00Z", updated_at="2026-09-01T00:12:00Z"),

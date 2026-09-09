@@ -75,6 +75,18 @@ def main():
     for block in run_blocks(workflow):
         require("${{ inputs." not in block, "workflow input is interpolated directly into a shell")
 
+    uploads = re.findall(
+        r"uses: actions/upload-artifact@[0-9a-f]{40}\n((?:        with:\n|          [^\n]*\n)+)",
+        workflow,
+    )
+    require(len(uploads) == 3, "publisher must retain the three exact transfer receipts")
+    for upload in uploads:
+        require(re.search(r"path: \$\{\{ steps\.nuc_[a-z_]+\.outputs\.path \}\}", upload),
+                "GitHub upload must contain only the bounded NUC receipt")
+        require("retention-days: 1" in upload, "transfer receipts must expire after one day")
+    require(workflow.count('artifact-store.py" restore') == 5,
+            "every publisher consumer must verify and restore its NUC receipt")
+
     actor = workflow.index("name: Authenticate the handoff actor")
     reader = workflow.index("name: Mint source-only read authority")
     require(actor < reader, "handoff actor must be authenticated before source access")
