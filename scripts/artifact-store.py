@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 SCHEMA = 'wagie.nuc-artifact/v1'
@@ -153,8 +154,29 @@ def publish(patterns, workspace, output, name, source, copy):
     require(len(encoded) <= MAX_RECEIPT_BYTES, 'artifact receipt exceeds 1 MiB')
     # Identical files within this handoff need only one physical upload.
     unique = {item['sha256']: path for item, path in zip(files, paths)}
+
+    def upload_verified(pair):
+        sha, path = pair
+        with tempfile.TemporaryDirectory(prefix='nuc-upload-', dir=os.environ.get('RUNNER_TEMP')) as scratch:
+            restored = Path(scratch) / 'object'
+            for attempt in range(3):
+                try:
+                    copy(path, sha, upload=True)
+                    copy(restored, sha)
+                except subprocess.CalledProcessError:
+                    if attempt == 2:
+                        raise
+                    restored.unlink(missing_ok=True)
+                    print(f"Retrying artifact transfer ({attempt + 2}/3): {path.relative_to(root)}",
+                          file=sys.stderr)
+                    continue
+                require(restored.is_file() and not restored.is_symlink() and
+                        restored.stat().st_size == path.stat().st_size and digest(restored) == sha,
+                        'stored artifact bytes do not match the producer')
+                return
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(lambda pair: copy(pair[1], pair[0], upload=True), unique.items()))
+        list(pool.map(upload_verified, unique.items()))
     # Refuse changed producer files rather than publishing a receipt for a moving input.
     for item, path in zip(files, paths):
         require(path.stat().st_size == item['size'] and digest(path) == item['sha256'],

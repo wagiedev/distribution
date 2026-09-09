@@ -3,9 +3,9 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
-
 
 SPEC = importlib.util.spec_from_file_location('artifact_store', Path(__file__).resolve().parents[1] / 'scripts/artifact-store.py')
 STORE = importlib.util.module_from_spec(SPEC)
@@ -121,8 +121,59 @@ class ArtifactStore(unittest.TestCase):
         data = json.loads((self.receipt / STORE.RECEIPT).read_text())
         self.assertEqual([item['path'] for item in data['files']],
                          ['assets/copy', 'assets/wagie', 'evidence/result.json'])
-        self.assertEqual(len(self.copies), 2)
+        self.assertEqual(sum(upload for _, upload in self.copies), 2)
+        self.assertEqual(sum(not upload for _, upload in self.copies), 2)
 
+    def test_successful_upload_without_readable_object_is_retried_before_receipt(self):
+        missing = STORE.digest(self.source / 'assets/wagie')
+        attempts = []
+
+        def copy(path, sha, upload=False):
+            if sha == missing:
+                if upload:
+                    attempts.append(sha)
+                    if len(attempts) == 1:
+                        return  # The CLI acknowledged an upload that is absent from storage.
+                elif not (self.objects / sha).exists():
+                    raise subprocess.CalledProcessError(1, ['aws', 's3', 'cp'])
+            self.copy(path, sha, upload)
+
+        STORE.publish('source/assets\nsource/evidence', self.root, self.receipt,
+                      'fixture', self.identity, copy)
+        self.assertEqual(len(attempts), 2)
+        STORE.restore(self.receipt, self.identity, 'fixture', self.copy)
+        self.assertEqual((self.receipt / 'assets/wagie').read_bytes(), b'exact executable bytes\x00\xff')
+
+    def test_persistent_missing_object_refuses_receipt_after_bounded_retries(self):
+        attempts = []
+
+        def copy(path, sha, upload=False):
+            if upload:
+                attempts.append(sha)
+                return
+            raise subprocess.CalledProcessError(1, ['aws', 's3', 'cp'])
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            STORE.publish('source/assets', self.root, self.receipt,
+                          'fixture', self.identity, copy)
+        self.assertEqual(len(attempts), 3)
+        self.assertFalse((self.receipt / STORE.RECEIPT).exists())
+
+    def test_successful_but_corrupt_readback_refuses_receipt_without_retry(self):
+        attempts = []
+
+        def copy(path, sha, upload=False):
+            if upload:
+                attempts.append(sha)
+                self.copy(path, sha, upload)
+            else:
+                path.write_bytes(b'x' * (self.objects / sha).stat().st_size)
+
+        with self.assertRaisesRegex(ValueError, 'stored artifact bytes'):
+            STORE.publish('source/assets', self.root, self.receipt,
+                          'fixture', self.identity, copy)
+        self.assertEqual(len(attempts), 1)
+        self.assertFalse((self.receipt / STORE.RECEIPT).exists())
 
 
 if __name__ == '__main__':

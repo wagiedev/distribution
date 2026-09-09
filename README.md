@@ -51,6 +51,9 @@ handoff deadline.
 
 GitHub Actions carries transfer receipts capped at 1 MiB, retained for one day.
 The binary, OCI and evidence files travel through the private NUC object store;
+publishers download each distinct uploaded object and verify its size and SHA256
+before issuing a receipt. Transfer failures get at most three attempts; corrupt
+readbacks fail immediately. On download,
 the receiver checks their identity, SHA256, size and mode against the authenticated
 receipt before applying the existing release and signature policies. The store
 expires objects after one day and enforces a 128 GiB bucket quota.
